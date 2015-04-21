@@ -1,8 +1,5 @@
-﻿1. projection
-2. standalone boolean type
-3. enum support
-4. Aggregate functions
-5. all binary operations
-6. Contains, startwith, endwith
+﻿4. Aggregate functions
 7. join
 8. group by
+5. all binary operations
+6. Contains, startwith, endwith

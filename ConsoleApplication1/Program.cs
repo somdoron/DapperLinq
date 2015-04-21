@@ -11,26 +11,7 @@ namespace ConsoleApplication1
 {
     class Program
     {
-        private class Person
-        {
-            public Person(int id, string name, int age, double balance)
-            {
-                Id = id;
-                Name = name;
-                Age = age;
-                Balance = balance;
-            }
-
-            public Person()
-            {
-
-            }
-
-            public int Id { get; set; }
-            public string Name { get; set; }
-            public double Balance { get; set; }
-            public int Age { get; set; }
-        }
+       
 
         public static void CreateDB()
         {
@@ -71,7 +52,7 @@ namespace ConsoleApplication1
             CreateDB();
             
 
-            SqlConnection connection = new SqlConnection(@"Data Source=(localdb)\v11.0;Initial Catalog=ORMTests;Integrated Security=True");
+            SqlConnection connection = new SqlConnection();
             var query = connection.Queryable<Person>().Where(p => p.Age > 13);
 
             foreach (var p in query)

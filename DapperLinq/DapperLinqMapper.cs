@@ -11,6 +11,7 @@ using Remotion.Linq;
 using Remotion.Linq.Clauses;
 using Remotion.Linq.Clauses.Expressions;
 using Remotion.Linq.Clauses.ExpressionTreeVisitors;
+using Remotion.Linq.Clauses.ResultOperators;
 using Remotion.Linq.Parsing;
 using Remotion.Linq.Parsing.Structure;
 
@@ -21,6 +22,14 @@ namespace DapperLinq
         public static IQueryable<T> Queryable<T>(this IDbConnection connection, IDbTransaction transaction = null)
         {
             return new SqlQueryable<T>(connection, transaction);
+        }
+
+        public static void AppendEnumerable(this StringBuilder stringBuilder, IEnumerable<string> e)
+        {
+            foreach (var item in e)
+            {
+                stringBuilder.Append(item);
+            }
         }
 
         public static void AppendEnumerable(this StringBuilder stringBuilder, IEnumerable<string> e, string delimiter)
@@ -50,7 +59,7 @@ namespace DapperLinq
                 if (first)
                 {
                     first = false;
-                    stringBuilder.AppendFormat("{0}{1}",prefix, item);
+                    stringBuilder.AppendFormat("{0}{1}", prefix, item);
                 }
                 else
                 {
@@ -96,11 +105,9 @@ namespace DapperLinq
 
             public T ExecuteSingle<T>(QueryModel queryModel, bool returnDefaultWhenEmpty)
             {
-                var result = ExecuteScalar<T>(queryModel);
+                var result = ExecuteCollection<T>(queryModel);
 
-                // Throw exception if empty
-
-                return result;
+                return returnDefaultWhenEmpty ? result.SingleOrDefault() : result.Single();
             }
 
             public IEnumerable<T> ExecuteCollection<T>(QueryModel queryModel)
@@ -119,11 +126,15 @@ namespace DapperLinq
             private string m_fromPart;
             private List<string> m_whereParts;
             private string m_selectPart;
+            private List<string> m_orderByParts;
+            private List<string> m_joinParts;
 
             public SqlQueryModelVisitor()
             {
                 m_parameters = new Parameters();
                 m_whereParts = new List<string>();
+                m_orderByParts = new List<string>();
+                m_joinParts = new List<string>();
             }
 
             public string GetSql()
@@ -131,7 +142,9 @@ namespace DapperLinq
                 StringBuilder stringBuilder = new StringBuilder();
                 stringBuilder.AppendFormat("select {0}", m_selectPart);
                 stringBuilder.AppendFormat(" from {0}", m_fromPart);
+                stringBuilder.AppendEnumerable(m_joinParts);
                 stringBuilder.AppendEnumerable(m_whereParts, " where ", " AND ");
+                stringBuilder.AppendEnumerable(m_orderByParts, " order by ", ", ");
 
                 return stringBuilder.ToString();
             }
@@ -148,6 +161,53 @@ namespace DapperLinq
                 base.VisitMainFromClause(fromClause, queryModel);
             }
 
+            public override void VisitResultOperator(ResultOperatorBase resultOperator, QueryModel queryModel, int index)
+            {
+                if (resultOperator is SumResultOperator)
+                {
+                    m_selectPart = string.Format("SUM({0})", m_selectPart);
+                }
+                else if (resultOperator is CountResultOperator)
+                {
+                    m_selectPart = string.Format("COUNT({0})", m_selectPart);
+                }
+                else if (resultOperator is AnyResultOperator)
+                {
+                    m_selectPart = string.Format("CASE COUNT({0}) WHEN 0 THEN 0 ELSE 1 END", m_selectPart);
+                }
+                else if (resultOperator is AverageResultOperator)
+                {
+                    m_selectPart = string.Format("AVG({0})", m_selectPart);
+                }
+                else if (resultOperator is MinResultOperator)
+                {
+                    m_selectPart = string.Format("MIN({0})", m_selectPart);
+                }
+                else if (resultOperator is MaxResultOperator)
+                {
+                    m_selectPart = string.Format("MAX({0})", m_selectPart);
+                }
+                else if (resultOperator is FirstResultOperator)
+                {
+                    m_selectPart = string.Format("TOP(1) {0}", m_selectPart);
+                }
+                else if (resultOperator is SingleResultOperator)
+                {
+                    // if we get more then one we throw exception
+                    m_selectPart = string.Format("TOP(2) {0}", m_selectPart);
+                }
+                else if (resultOperator is LastResultOperator)
+                {
+                    throw new NotSupportedException("Last is not supported, reverse the order and use First");
+                }
+                else
+                {
+                    throw new NotSupportedException(resultOperator.GetType().Name + " is not supported");
+                }
+
+                base.VisitResultOperator(resultOperator, queryModel, index);
+            }
+
             public override void VisitSelectClause(SelectClause selectClause, QueryModel queryModel)
             {
                 m_selectPart = SelectExpressionVisitor.GetStatement(m_parameters, selectClause.Selector);
@@ -158,6 +218,30 @@ namespace DapperLinq
             public override void VisitWhereClause(WhereClause whereClause, QueryModel queryModel, int index)
             {
                 m_whereParts.Add(WhereExpressionVisitor.GetStatement(m_parameters, whereClause.Predicate));
+            }
+
+            public override void VisitOrderByClause(OrderByClause orderByClause, QueryModel queryModel, int index)
+            {
+                foreach (var ordering in orderByClause.Orderings)
+                {
+                    m_orderByParts.Add(OrderByExpressionVisitor.GetStatement(m_parameters, ordering.Expression, ordering.OrderingDirection));
+                }
+            }
+
+            public override void VisitJoinClause(JoinClause joinClause, QueryModel queryModel, int index)
+            {
+                SqlExpressionVisitor sqlExpressionVisitor = new SqlExpressionVisitor(m_parameters);
+                sqlExpressionVisitor.VisitExpression(joinClause.InnerKeySelector);
+                string innerKey = sqlExpressionVisitor.GetStatement();
+
+                sqlExpressionVisitor = new SqlExpressionVisitor(m_parameters);
+                sqlExpressionVisitor.VisitExpression(joinClause.OuterKeySelector);
+                string outerKey = sqlExpressionVisitor.GetStatement();
+
+                m_joinParts.Add(string.Format(" JOIN {0} AS {1} ON {2} = {3}", joinClause.ItemType.Name, joinClause.ItemName, outerKey,
+                    innerKey));
+
+                base.VisitJoinClause(joinClause, queryModel, index);
             }
         }
 
@@ -204,10 +288,11 @@ namespace DapperLinq
         class SelectExpressionVisitor : SqlExpressionVisitor
         {
             private readonly Parameters m_parameters;
-            
-            public SelectExpressionVisitor(Parameters parameters) : base(parameters)
+
+            public SelectExpressionVisitor(Parameters parameters)
+                : base(parameters)
             {
-                m_parameters = parameters;             
+                m_parameters = parameters;
             }
 
             public static string GetStatement(Parameters parameters, Expression expression)
@@ -222,6 +307,53 @@ namespace DapperLinq
                 Statement.AppendEnumerable(expression.ReferencedQuerySource.ItemType.GetProperties().Select(p => p.Name), string.Format("{0}.",
                     expression.ReferencedQuerySource.ItemName), string.Format(", {0}.", expression.ReferencedQuerySource.ItemName));
                 return expression;
+            }
+
+            protected override Expression VisitMemberInitExpression(MemberInitExpression expression)
+            {
+                for (int i = 0; i < expression.Bindings.Count; i++)
+                {
+                    var binding = expression.Bindings[i] as MemberAssignment;
+
+                    if (binding == null)
+                    {
+                        base.VisitMemberInitExpression(expression);
+                        return expression;
+                    }
+
+                    if (i != 0)
+                    {
+                        Statement.Append(", ");
+                    }
+
+                    VisitExpression(binding.Expression);
+
+                    Statement.AppendFormat(" AS {0}", binding.Member.Name);
+                }
+
+                return expression;
+            }
+
+            protected override Expression VisitNewExpression(NewExpression expression)
+            {
+                var parameters = expression.Constructor.GetParameters();
+
+                for (int i = 0; i < expression.Arguments.Count; i++)
+                {
+                    if (i != 0)
+                        Statement.Append(", ");
+
+                    VisitExpression(expression.Arguments[i]);
+
+                    Statement.AppendFormat(" AS {0}", parameters[i].Name);
+                }
+
+                return expression;
+            }
+
+            protected override Expression VisitArithmeticMemberExpression(MemberExpression expression)
+            {
+                return VisitMemberExpression(expression);
             }
 
             protected override Expression VisitMemberExpression(MemberExpression expression)
@@ -244,25 +376,48 @@ namespace DapperLinq
             }
         }
 
+        class OrderByExpressionVisitor : SqlExpressionVisitor
+        {
+            public OrderByExpressionVisitor(Parameters parameters)
+                : base(parameters)
+            {
+            }
+
+            public static string GetStatement(Parameters parameters, Expression expression, OrderingDirection orderingDirection)
+            {
+                var expressionVisitor = new OrderByExpressionVisitor(parameters);
+                expressionVisitor.VisitExpression(expression);
+
+                if (orderingDirection == OrderingDirection.Desc)
+                {
+                    expressionVisitor.Statement.Append(" desc");
+                }
+
+                return expressionVisitor.GetStatement();
+            }
+        }
+
         class WhereExpressionVisitor : SqlExpressionVisitor
         {
             private readonly Parameters m_parameters;
-            
+
             public WhereExpressionVisitor(Parameters parameters)
                 : base(parameters)
             {
-                m_parameters = parameters;                
+                m_parameters = parameters;
             }
 
             public static string GetStatement(Parameters parameters, Expression expression)
             {
                 var expressionVisitor = new WhereExpressionVisitor(parameters);
+                expressionVisitor.Statement.Append("(");
                 expressionVisitor.VisitExpression(expression);
+                expressionVisitor.Statement.Append(")");
                 return expressionVisitor.GetStatement();
             }
         }
 
-        class SqlExpressionVisitor : ThrowingExpressionTreeVisitor
+        private class SqlExpressionVisitor : ThrowingExpressionTreeVisitor
         {
             private readonly Parameters m_parameters;
 
@@ -272,63 +427,132 @@ namespace DapperLinq
             {
                 m_parameters = parameters;
                 Statement = new StringBuilder();
-            }      
+            }
 
             public string GetStatement()
-            {                
+            {
                 return Statement.ToString();
+            }
+
+            public override Expression VisitExpression(Expression expression)
+            {
+                return base.VisitExpression(expression);
             }
 
             protected override Expression VisitBinaryExpression(BinaryExpression expression)
             {
-                VisitExpression(expression.Left);
+                string op = "";
+                bool arthemetic;
 
                 switch (expression.NodeType)
                 {
                     case ExpressionType.Equal:
-                        Statement.Append(" = ");
+                        op = " = ";
+                        arthemetic = true;
                         break;
                     case ExpressionType.NotEqual:
-                        Statement.Append(" <> ");
+                        op = " <> ";
+                        arthemetic = true;
                         break;
                     case ExpressionType.GreaterThan:
-                        Statement.Append(" > ");
+                        op = " > ";
+                        arthemetic = true;
                         break;
                     case ExpressionType.GreaterThanOrEqual:
-                        Statement.Append(" >= ");
+                        op = " >= ";
+                        arthemetic = true;
                         break;
                     case ExpressionType.LessThan:
-                        Statement.Append(" < ");
+                        op = " < ";
+                        arthemetic = true;
                         break;
                     case ExpressionType.LessThanOrEqual:
-                        Statement.Append(" <= ");
+                        op = " <= ";
+                        arthemetic = true;
                         break;
                     case ExpressionType.Add:
-                        Statement.Append(" + ");
+                        op = " + ";
+                        arthemetic = true;
                         break;
                     case ExpressionType.Subtract:
-                        Statement.Append(" - ");
+                        op = " - ";
+                        arthemetic = true;
                         break;
                     case ExpressionType.Multiply:
-                        Statement.Append(" * ");
+                        op = " * ";
+                        arthemetic = true;
                         break;
                     case ExpressionType.Divide:
-                        Statement.Append(" / ");
+                        op = " / ";
+                        arthemetic = true;
                         break;
-                    case ExpressionType.And:
                     case ExpressionType.AndAlso:
-                        Statement.Append(" AND ");
+                        op = " AND ";
+                        arthemetic = false;
                         break;
-                    case ExpressionType.Or:
                     case ExpressionType.OrElse:
-                        Statement.Append(" OR ");
-                        break;                        
+                        op = " OR ";
+                        arthemetic = false;
+                        break;
                     default:
                         base.VisitBinaryExpression(expression);
+                        arthemetic = false;
                         break;
                 }
 
-                VisitExpression(expression.Right);
+                Statement.Append("(");
+
+                if (arthemetic)
+                {
+                    if (expression.Left.NodeType == ExpressionType.MemberAccess)
+                    {
+                        VisitArithmeticMemberExpression(expression.Left as MemberExpression);
+                    }
+                    else
+                    {
+                        VisitExpression(expression.Left);
+                    }
+
+                    Statement.Append(op);
+
+                    if (expression.Right.NodeType == ExpressionType.MemberAccess)
+                    {
+                        VisitArithmeticMemberExpression(expression.Right as MemberExpression);
+                    }
+                    else
+                    {
+                        VisitExpression(expression.Right);
+                    }
+                }
+                else
+                {
+                    VisitExpression(expression.Left);
+                    Statement.Append(op);
+                    VisitExpression(expression.Right);
+                }
+
+                Statement.Append(")");
+
+                return expression;
+            }
+
+            protected override Expression VisitUnaryExpression(UnaryExpression expression)
+            {
+                if (expression.NodeType == ExpressionType.Not)
+                {
+                    Statement.Append("NOT (");
+                    VisitExpression(expression.Operand);
+                    Statement.Append(")");
+                }
+                else if (expression.NodeType == ExpressionType.Convert)
+                {
+                    VisitExpression(expression.Operand);
+                }
+                else
+                {
+                    base.VisitUnaryExpression(expression);
+                }
+
                 return expression;
             }
 
@@ -336,9 +560,22 @@ namespace DapperLinq
             {
                 Statement.Append(expression.ReferencedQuerySource.ItemName);
                 return expression;
-            }            
+            }
 
             protected override Expression VisitMemberExpression(MemberExpression expression)
+            {
+                VisitExpression(expression.Expression);
+                Statement.AppendFormat(".{0}", expression.Member.Name);
+
+                if (expression.Type == typeof(bool))
+                {
+                    Statement.Append(" = 1");
+                }
+
+                return expression;
+            }
+
+            protected virtual Expression VisitArithmeticMemberExpression(MemberExpression expression)
             {
                 VisitExpression(expression.Expression);
                 Statement.AppendFormat(".{0}", expression.Member.Name);
@@ -366,6 +603,6 @@ namespace DapperLinq
                 var itemAsExpression = unhandledItem as Expression;
                 return itemAsExpression != null ? FormattingExpressionTreeVisitor.Format(itemAsExpression) : unhandledItem.ToString();
             }
-        } 
+        }
     }
 }
