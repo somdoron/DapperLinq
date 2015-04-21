@@ -13,7 +13,7 @@ namespace ConsoleApplication1
     {
         private class Person
         {
-            public Person(Guid id, string name, int age, double balance)
+            public Person(int id, string name, int age, double balance)
             {
                 Id = id;
                 Name = name;
@@ -26,7 +26,7 @@ namespace ConsoleApplication1
 
             }
 
-            public Guid Id { get; set; }
+            public int Id { get; set; }
             public string Name { get; set; }
             public double Balance { get; set; }
             public int Age { get; set; }
@@ -54,10 +54,13 @@ namespace ConsoleApplication1
 
                     command.CommandText =
                     "CREATE TABLE [dbo].[Person] (" +
-                    "[Id]   UNIQUEIDENTIFIER NOT NULL," +
+                    "[Id]   INT NOT NULL," +
                     "[Name] NVARCHAR (255)   NOT NULL," +
                     "[Balance] FLOAT         NOT NULL," +
                     "[Age]  INT              NOT NULL);";
+                    command.ExecuteNonQuery();
+
+                    command.CommandText = "INSERT INTO [dbo].[Person] VALUES (1, 'Doron',1000, 29)";
                     command.ExecuteNonQuery();
                 }
             }
@@ -66,6 +69,7 @@ namespace ConsoleApplication1
         static void Main(string[] args)
         {
             CreateDB();
+            
 
             SqlConnection connection = new SqlConnection(@"Data Source=(localdb)\v11.0;Initial Catalog=ORMTests;Integrated Security=True");
             var query = connection.Queryable<Person>().Where(p => p.Age > 13);
